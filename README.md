@@ -5,7 +5,7 @@
 `tv-agent-quickstart` is a small, dependency-light Python toolkit for building
 voice-and-remote-friendly AI companion agents for living-room displays
 (Fire TV, smart TVs, set-top boxes). It was extracted from the
-[ReelMind](https://github.com/<YOUR_GITHUB>/reelmind) hackathon project
+[ReelMind](https://github.com/harshsinghhh120-bot/reelmind) hackathon project
 (Build, Ship, Shape: Amazon Developer Hackathon, Oct 2026).
 
 ## What you get
