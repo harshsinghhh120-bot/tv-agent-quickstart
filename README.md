@@ -59,6 +59,22 @@ reply = agent.ask(viewer_id="couch-1", message="Why did she do that?")
 print(reply.kind, reply.text)                     # structured, always
 ```
 
+Two execution modes:
+
+```python
+# Agent mode (default): real Strands loop on Bedrock; the model can call tools.
+agent = create_companion_agent(system_prompt=..., tools=[...])
+
+# Simple mode: one LLMClient.complete() per turn — no agent loop, no tools.
+# Pair with any LLMClient (Bedrock, or a stub for offline dev/demo):
+agent = create_companion_agent(system_prompt=..., tools=[...],
+                               simple=True, llm=my_llm)
+```
+
+Simple mode is what ReelMind's `DEMO_MODE=1` uses to run the full TV stack
+with zero AWS. In simple mode the caller should include show context in each
+message (the kit only injects stored viewer state).
+
 ### 3. Serve it to your TV app
 
 ```python

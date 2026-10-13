@@ -5,6 +5,16 @@ with a companion system prompt and your tools. `CompanionAgent.ask()` is
 the single entry point the server (and your TV app) uses, and it *always*
 returns a validated `CompanionReply`.
 
+Two execution modes:
+
+* **agent mode** (default): a real Strands agent loop on Bedrock — the model
+  can call your tools (progress, quiz, explain, ...).
+* **simple mode** (`simple=True`): model-direct — one `LLMClient.complete()`
+  call per turn, no agent loop, no tools. Perfect for demos/offline dev
+  (pair with a stub LLMClient) and as a cheap fallback. Conversation context
+  must be included in the prompt by the caller (the kit injects stored
+  viewer state; the client app should include the show title in messages).
+
 Design: the model decides, the kit enforces. The system prompt carries the
 policy (spoilers, tone, output shape); `parse_reply()` guarantees the wire
 contract no matter what the model actually emits.
@@ -39,15 +49,57 @@ def tool(fn: Callable) -> Callable:
 
     With `strands-agents` installed this is the real `@tool` (docstring
     becomes the model-facing tool description). Without it, the function
-    passes through unchanged so unit tests can run anywhere.
+    passes through unchanged so unit tests can run anywhere. The decorated
+    result (strands' `DecoratedFunctionTool`) stays directly callable.
     """
     if _HAS_STRANDS:
         return _strands_tool(fn)
     return fn
 
 
+def _extract_text(result: Any) -> str:
+    """Coerce an agent/model result into text.
+
+    Handles: str | dict (message or AgentResult.to_dict shape) | AgentResult
+    (with .message) | anything else (str()).
+    """
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+
+    def _text_blocks(content: Any) -> str:
+        if not isinstance(content, list):
+            return ""
+        out = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                out.append(str(item.get("text", "")))
+            elif isinstance(item, str):
+                out.append(item)
+        return "\n".join(out)
+
+    if isinstance(result, dict):
+        if "content" in result:
+            return _text_blocks(result.get("content"))
+        inner = result.get("message")
+        if isinstance(inner, dict):
+            return _text_blocks(inner.get("content"))
+        return json.dumps(result)
+    so = getattr(result, "structured_output", None)
+    if so is not None:
+        try:
+            return so.model_dump_json()
+        except Exception:  # noqa: BLE001
+            return str(so)
+    msg = getattr(result, "message", None)
+    if isinstance(msg, dict):
+        return _text_blocks(msg.get("content"))
+    return str(result)
+
+
 class CompanionAgent:
-    """A Strands agent wrapped in the companion contract."""
+    """A companion with a guaranteed reply contract."""
 
     def __init__(
         self,
@@ -58,15 +110,20 @@ class CompanionAgent:
         fast_model: str = DEFAULT_FAST_MODEL,
         llm: Optional[LLMClient] = None,
         strands_agent: Optional[Any] = None,
+        simple: bool = False,
     ):
         self.name = name
         self.system_prompt = system_prompt
         self.model = model
         self.fast_model = fast_model
+        self.simple = simple
         self.llm: LLMClient = llm or BedrockLLMClient()
         self._tools = tools or []
 
-        if strands_agent is not None:
+        if simple:
+            # Model-direct mode: no agent loop, no tools.
+            self._agent = None
+        elif strands_agent is not None:
             self._agent = strands_agent
         elif _HAS_STRANDS:
             self._agent = _StrandsAgent(
@@ -96,26 +153,30 @@ class CompanionAgent:
         **kwargs: Any,
     ) -> CompanionReply:
         """Run one companion turn. Always returns a CompanionReply."""
+        if self.simple:
+            prompt = f"{self.context_block(viewer_id, state or {})}\n\nUser message: {message}"
+            try:
+                raw = self.llm.complete(self.system_prompt, prompt, **kwargs)
+            except Exception as e:  # noqa: BLE001 — the TV must never crash
+                return CompanionReply.error("llm_error", f"Model call failed: {e.__class__.__name__}")
+            return parse_reply(raw)
+
         if self._agent is None:
-            if _HAS_STRANDS is False:
-                return CompanionReply.error(
-                    "no_agent",
-                    "The agent backend is not available. Install 'tv-agent-quickstart[bedrock]' "
-                    "(strands-agents + boto3) and configure AWS credentials.",
-                )
+            return CompanionReply.error(
+                "no_agent",
+                "The agent backend is not available. Install 'tv-agent-quickstart[bedrock]' "
+                "(strands-agents + boto3) and configure AWS credentials — or run in DEMO_MODE "
+                "(simple mode with a stub LLM) for offline development.",
+            )
         prompt = (
             f"{self.context_block(viewer_id, state or {})}\n\n"
             f"User message: {message}"
         )
         try:
-            raw = self._agent(prompt, **kwargs)
+            result = self._agent(prompt, **kwargs)
         except Exception as e:  # noqa: BLE001 — the TV must never crash
             return CompanionReply.error("agent_error", f"I hit a snag talking to my brain: {e.__class__.__name__}")
-        return parse_reply(raw)
-
-    def tool_result(self, reply: CompanionReply) -> CompanionReply:
-        """Tools return CompanionReplies directly; normalize defensively."""
-        return parse_reply(reply)
+        return parse_reply(_extract_text(result))
 
     # ------------------------------------------------------------------
     # convenience for the two "fast lane" patterns
@@ -133,9 +194,14 @@ def create_companion_agent(
     model: str = DEFAULT_REASONING_MODEL,
     fast_model: str = DEFAULT_FAST_MODEL,
     llm: Optional[LLMClient] = None,
+    simple: bool = False,
     **agent_kwargs: Any,
 ) -> CompanionAgent:
-    """One-call construction. See README.md quickstart."""
+    """One-call construction. See README.md quickstart.
+
+    `simple=True` → model-direct mode (no Strands agent loop); the injected
+    `llm` is the only model dependency. Ideal for demos and offline dev.
+    """
     return CompanionAgent(
         name=name,
         system_prompt=system_prompt,
@@ -143,5 +209,6 @@ def create_companion_agent(
         model=model,
         fast_model=fast_model,
         llm=llm,
+        simple=simple,
         **agent_kwargs,
     )

@@ -85,6 +85,20 @@ def create_app(
             message=_action_to_message(req),
             state=state,
         )
+        # Protocol-driven memory sync: any card carrying a progress record is
+        # persisted, so viewer state stays consistent whether the model called
+        # a tool or simply returned a progress_update card.
+        if reply.progress is not None:
+            try:
+                memory.set_progress(
+                    req.viewer_id,
+                    reply.progress.title,
+                    reply.progress.season,
+                    reply.progress.episode,
+                    note=reply.progress.note or "",
+                )
+            except Exception:  # noqa: BLE001 — memory must never break the turn
+                pass
         # Tools that mutate state have already written to `memory` during the
         # turn (they close over the same store the server passes around).
         if reply.kind.value == "error" and reply.error_code in ("no_agent",):
